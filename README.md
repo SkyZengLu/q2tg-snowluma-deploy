@@ -4,9 +4,11 @@
 
 > 2026/11/5 · 教程 · QQ · Telegram · Docker · Ubuntu
 
+> **适用版本**（最后验证：2026/11）——Q2TG `ghcr.io/clansty/q2tg:sleepyfox`（2025-12 构建，需 3 个补丁）、SnowLuma `motricseven7/snowluma:latest`（或 `v1.10.x`）、PostgreSQL `postgres:14-alpine`、Ubuntu 22.04 LTS。
+
 本文记录一次完整的 Q2TG 部署过程：用 **SnowLuma** 登录 QQ 并提供 OneBot 接口，用 **Q2TG v4** 把 QQ 群和 Telegram 群双向打通。
 
-所有命令都在 Ubuntu 22.04 上实测过，包括踩过的坑和最终解决办法。
+以下命令在 Ubuntu 22.04 上验证过，包括踩过的坑和最终解决办法；部分配置以 SnowLuma / Q2TG 官方文档为准。
 
 ---
 
@@ -68,10 +70,10 @@ this.ws = new ReconnectingWebSocket(wsUrl);
 this.ws.send(JSON.stringify({ action, params, echo }));
 ```
 
-SnowLuma 正好提供 OneBot v11 WS，并且实现了 115 个 NapCat 兼容动作，所以可以：
+SnowLuma 正好提供 OneBot v11 WS，[官方文档](https://snowluma.github.io/zh/docs/api)列了 115 个动作（部分与 NapCat 同名/兼容），所以可以：
 
-- 不用装 icqq + qsign（少两个容器）
-- 不用装 NapCat
+- 不用装 NapCat，也不用 qsign（少两个容器）
+- 不用 icqq 登录 QQ
 - QQ 只登录一次，不会被两个框架互踢
 
 代价是个别接口字段不一致，需要打补丁（见第九节）。
@@ -476,11 +478,12 @@ NAPCAT_WS_URL=ws://snowluma:3001/?access_token=<第五节的 WS_TOKEN>
 # 其他
 TG_CONNECTION=tcp
 TZ=Asia/Shanghai
-# 必须填一个合法 URL，否则转发全挂（见坑 8）。两档二选一：
+# 必须填一个合法 URL，否则群消息转发全挂（见坑 8）。
 # 有域名 → RichHeader 卡片、合并转发查看器都能用
 WEB_ENDPOINT=https://你的域名
-# 没域名 → 只修掉 Invalid URL，RichHeader 仍会 WEBPAGE_URL_INVALID（见坑 13），取消下面这行注释并注释上面那行
-# WEB_ENDPOINT=http://你的服务器IP:8443
+# 没域名 → 不要填 http://IP:8443：10.3 的 nginx 是 TLS 监听，明文请求会 400（见坑 7）。
+# 改成一个格式合法的占位 URL 把 Invalid URL 压住，再用 /flags add DISABLE_RICH_HEADER 关掉卡片（见坑 13）：
+# WEB_ENDPOINT=https://example.com
 
 # 合并转发查看器（可选）：先在 BotFather /newapp 注册 https://你的域名/ui/chatRecord
 CRV_VIEWER_APP=https://t.me/你的机器人/你指定的名字
@@ -616,17 +619,23 @@ docker compose logs q2tg | grep "WS 连接成功"
 
 ## 八、踩坑记录（15 条）
 
-### 坑 1：没有 root 权限
+### 坑 1：sudo 要密码 / 不在 sudoers 里
 
-**现象**：sudo 要密码，Docker/apt 全部失败。
+**现象**：`sudo` 提示输密码，或当前用户根本没权限；Docker、apt 全部跑不起来。
 
-**解决**：配置免密 sudo 或用 root 执行。
+**解决**：先确认是不是免密：
 
 ```bash
-echo '用户名 ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/90-temp
+sudo -n true && echo "免密 OK" || echo "需要密码或没有权限"
+```
+
+临时开 NOPASSWD（仅安装期间，用完删）：
+
+```bash
+echo "$USER ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/90-temp
 sudo chmod 0440 /etc/sudoers.d/90-temp
 sudo visudo -cf /etc/sudoers.d/90-temp   # 语法校验，不通过就别退出当前会话
-# 用完删掉，临时免密不是长期方案
+# 装完删掉：sudo rm /etc/sudoers.d/90-temp
 ```
 
 ### 坑 2：Docker Hub 被墙 / 镜像站卡死
@@ -691,10 +700,11 @@ sudo visudo -cf /etc/sudoers.d/90-temp   # 语法校验，不通过就别退出�
 
 ```ini
 WEB_ENDPOINT=https://你的域名            # 有域名，RichHeader 也能用
-# WEB_ENDPOINT=http://你的服务器IP:8443  # 没域名，只修这个报错
+# WEB_ENDPOINT=https://example.com       # 没域名：占位 URL 压掉报错，再用 /flags add DISABLE_RICH_HEADER 关卡片
 ```
 
-> 填 IP + 非标端口**只解决 `Invalid URL` 这一个报错**，RichHeader 卡片仍然会 `WEBPAGE_URL_INVALID`（见坑 13）。
+> 不要填 `http://你的服务器IP:8443`：10.3 的 nginx 是 `listen 8443 ssl`，明文请求会 400（坑 7）。
+> 占位 URL 只解决 `Invalid URL` 这一个报错，RichHeader 卡片仍然会 `WEBPAGE_URL_INVALID`（见坑 13），需要关掉。
 
 ### 坑 9：表情包/图片转发失败 `ENOENT`
 
