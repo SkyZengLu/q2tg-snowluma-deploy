@@ -192,7 +192,7 @@ sleep 3
 ```bash
 ufw status          # 确认是否 active
 ufw allow 22/tcp
-ufw allow 8443/tcp  # 按需
+ufw allow 8443/tcp  # 走 nginx 反代 / 填了 WEB_ENDPOINT 就必须放行
 ```
 
 > **提示**
@@ -221,6 +221,14 @@ docker tag docker.m.daocloud.io/motricseven7/snowluma:latest motricseven7/snowlu
 > 拉取卡住时会出现僵尸 `docker pull` 进程，用 `pkill -x docker` 清理。
 > **不要**用 `pkill -f 'docker pull'`，它会匹配到当前命令行把自己杀掉。
 
+先建好共享网络和卷。下面 5.2 的 compose 以 `external` 方式引用它们，不先建好，`up -d` 会直接报 `external volume "q2tg-cache" not found`：
+
+```bash
+mkdir -p /opt/snowluma
+docker network create qq-bridge 2>/dev/null || true
+docker volume create q2tg-cache 2>/dev/null || true
+```
+
 ### 5.2 配置文件
 
 ```yaml
@@ -230,7 +238,7 @@ services:
     image: motricseven7/snowluma:latest
     container_name: snowluma
     restart: unless-stopped
-    shm_size: 1gb
+    shm_size: 1gb                 # Chromium 系要更大的 /dev/shm，容器默认 64MB 会崩
     ulimits:
       nofile:
         soft: 65536
@@ -241,6 +249,7 @@ services:
       - seccomp=unconfined      # 必须：默认 seccomp 会拦 ptrace
     environment:
       TZ: Asia/Shanghai
+      # 留空则首次启动随机生成，只在容器日志里打印一次
       VNC_PASSWD: "换成强密码"
       SNOWLUMA_UID: 1000
       SNOWLUMA_GID: 1000
@@ -278,6 +287,7 @@ volumes:
     name: q2tg-cache
 
 networks:
+  default: {}
   qq-bridge:
     external: true
     name: qq-bridge
@@ -291,7 +301,11 @@ docker compose up -d
 sleep 25
 
 docker compose ps
-ss -tln | grep -E ':(5099|6081|3000|3001)'
+# OneBot 的 3000/3001 要等 QQ 登录后才会监听，此刻查不到是正常的，先只验 5099/6081
+ss -tln | grep -E ':(5099|6081)'
+
+# WebUI 的一次性登录凭据：只在全新数据卷首次启动时打印一次
+docker logs snowluma 2>&1 | grep -E "临时密码|initial credentials" | tail -n 1
 
 # 验证 ptrace 权限
 docker exec snowluma getcap /usr/local/bin/node
@@ -307,6 +321,11 @@ docker exec snowluma supervisorctl status
 **方式 A：直接截二维码（最快）**
 
 ```bash
+# 镜像自带的是 Linux QQ + Xvfb + VNC + noVNC + supervisord，不一定有 ffmpeg，先探一下
+docker exec snowluma sh -c 'command -v ffmpeg || echo "缺 ffmpeg"'
+# 缺就临时装（容器重建后失效，只影响本次）
+docker exec -u root snowluma sh -c 'apt-get update && apt-get install -y ffmpeg'
+
 docker exec snowluma sh -c \
   'DISPLAY=:1 ffmpeg -y -loglevel error -f x11grab -video_size 1920x1080 -i :1 -frames:v 1 /tmp/qr.jpg'
 docker cp snowluma:/tmp/qr.jpg ./qr.jpg
@@ -325,7 +344,8 @@ docker cp snowluma:/tmp/qr-crop.png ./qq-login-qr.png
 > 可以用 XTest 远程点刷新：
 >
 > ```bash
-> docker exec -i snowluma python3 - <<'PY'
+> # 必须以 snowluma 用户连 :1，docker exec 默认是 root，连不上 uid 1000 的 X 会话
+> docker exec -u snowluma -e DISPLAY=:1 -i snowluma python3 - <<'PY'
 > import ctypes, time
 > x11 = ctypes.CDLL("libX11.so.6"); xtst = ctypes.CDLL("libXtst.so.6")
 > x11.XOpenDisplay.restype = ctypes.c_void_p
@@ -361,11 +381,11 @@ ssh -L 6081:127.0.0.1:6081 user@服务器IP
 > refusing new client 127.0.0.1
 > ```
 >
-> 解决：重启 x11vnc 清掉占位。
+> 解决：重启 x11vnc 清掉占位。镜像用 supervisord 托管 x11vnc，直接重启服务最干净——手动再起第二个进程会跟 supervisor 抢 5900，参数也可能不一致：
 >
 > ```bash
-> docker exec snowluma sh -c 'pkill -f "x11vnc -display :1"; sleep 2'
-> docker exec -d snowluma sh -c 'DISPLAY=:1 x11vnc -display :1 -noxrecord -noxfixes -noxdamage -forever -threads -rfbauth /root/.vnc/passwd -o /tmp/x11vnc.log'
+> docker exec snowluma supervisorctl restart x11vnc
+> # 服务名记不清就先列：docker exec snowluma supervisorctl status
 > ```
 
 登录成功后：
@@ -382,6 +402,8 @@ SnowLuma 有**两套独立令牌**（HTTP 和 WS 不同）：
 docker exec snowluma cat /app/data/config/onebot.json
 docker exec snowluma cat /app/data/config/onebot_<QQ号>.json
 ```
+
+文件里还有 `enabled`、`host`、`path`、`messageFormat` 等字段，这里只列关键部分：
 
 ```json
 {
@@ -435,7 +457,9 @@ TG_BOT_TOKEN=123456789:AAxxxxxxxxxxxxxxxxxxxx
 # 数据库
 POSTGRES_DB=q2tg
 POSTGRES_USER=q2tg
-POSTGRES_PASSWORD=换成随机强密码
+# 只用字母数字和 _- ，避免拼进 DATABASE_URL 时被 @ : / ? # 截断
+# 生成：openssl rand -hex 24
+POSTGRES_PASSWORD=换成随机强密码_仅限字母数字下划线中划线
 
 # SOCKS5 代理（只给 Q2TG 连 Telegram）
 PROXY_IP=1.2.3.4
@@ -450,8 +474,14 @@ NAPCAT_WS_URL=ws://snowluma:3001/?access_token=<第五节的 WS_TOKEN>
 # 其他
 TG_CONNECTION=tcp
 TZ=Asia/Shanghai
-# 没有域名也要填一个合法 URL，否则转发全挂（见踩坑 8）
-WEB_ENDPOINT=http://你的服务器IP:8443
+# 必须填一个合法 URL，否则转发全挂（见坑 8）。两档二选一：
+# 有域名 → RichHeader 卡片、合并转发查看器都能用
+WEB_ENDPOINT=https://你的域名
+# 没域名 → 只修掉 Invalid URL，RichHeader 仍会 WEBPAGE_URL_INVALID（见坑 13），取消下面这行注释并注释上面那行
+# WEB_ENDPOINT=http://你的服务器IP:8443
+
+# 合并转发查看器（可选）：先在 BotFather /newapp 注册 https://你的域名/ui/chatRecord
+CRV_VIEWER_APP=https://t.me/你的机器人/你指定的名字
 ```
 
 ### 6.3 docker-compose.yaml
@@ -478,7 +508,9 @@ services:
     volumes:
       - q2tg:/app/data
       - cache:/app/.config/QQ/NapCat/temp   # 与 SnowLuma 共享
-      - ./patched/index.js:/app/build/index.js   # 补丁（见第九节）
+      # 注意：这个文件必须先按 9.2 从镜像里导出再打补丁。
+      # 首次启动时若它不存在，Docker 会把挂载点创建成同名「目录」，容器直接起不来。
+      - ./patched/index.js:/app/build/index.js
     networks:
       - default
       - qq-bridge
@@ -512,16 +544,14 @@ networks:
 ### 6.4 创建网络并按顺序启动
 
 ```bash
-# 1) 创建共享网络
-docker network create qq-bridge
+# 1) 建共享网络与卷（若 5.2 已建过，这里幂等，重复执行无妨）
+docker network create qq-bridge 2>/dev/null || true
+docker volume create q2tg-cache 2>/dev/null || true
 
-# 2) 先起 Q2TG 的 postgres（创建 q2tg-cache 卷）
-cd /opt/q2tg && docker compose up -d postgres
-
-# 3) 再起 SnowLuma（它引用 external 的 q2tg-cache 和 qq-bridge）
+# 2) 再起 SnowLuma（它引用 external 的 q2tg-cache 和 qq-bridge）
 cd /opt/snowluma && docker compose up -d
 
-# 4) 起 Q2TG
+# 3) 起 Q2TG（含 postgres）
 cd /opt/q2tg && docker compose up -d
 ```
 
@@ -569,8 +599,8 @@ docker compose logs q2tg | grep "WS 连接成功"
 3. **QQ 侧**
    - 自动用 `.env` 的 `NAPCAT_WS_URL` 连 SnowLuma
 4. **绑定**
-   - 群组模式：填 QQ 群号 + TG 群
-   - 个人模式：用 `/addfriend` 选好友自动建群
+   - 群组模式：把 bot 拉进 TG 群 → **设为管理员**（否则收不到消息）→ 在群里发 `/start@你的bot名 <QQ群号>`；也可以私聊 bot 发 `/add`，点按钮里的「关联 Telegram 群组」
+   - 个人模式：私聊 `/addfriend` 选好友，选「自动创建群组」
 
 常用命令：
 
@@ -578,7 +608,7 @@ docker compose logs q2tg | grep "WS 连接成功"
 | :---: | --- |
 | `/setup` | 首次配置 / 重新配置 |
 | `/addfriend` | 个人模式：选择 QQ 好友关联 |
-| `/flags` | 设置实例开关（如 `DISABLE_RICH_HEADER`） |
+| `/flags` | 设置实例开关（如 `DISABLE_RICH_HEADER`），改完**即时生效**，不用重启 |
 
 ---
 
@@ -592,6 +622,9 @@ docker compose logs q2tg | grep "WS 连接成功"
 
 ```bash
 echo '用户名 ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/90-temp
+sudo chmod 0440 /etc/sudoers.d/90-temp
+sudo visudo -cf /etc/sudoers.d/90-temp   # 语法校验，不通过就别退出当前会话
+# 用完删掉，临时免密不是长期方案
 ```
 
 ### 坑 2：Docker Hub 被墙 / 镜像站卡死
@@ -652,11 +685,14 @@ echo '用户名 ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/90-temp
 
 **原因**：Q2TG 的 bug，`WEB_ENDPOINT` 为空时 `new URL("undefined/richHeader/...")` 抛异常，而调用处没判空。
 
-**解决**：`.env` 里设置任意合法 URL：
+**解决**：`.env` 里必须设一个合法 URL，别留空：
 
 ```ini
-WEB_ENDPOINT=http://你的服务器IP:8443
+WEB_ENDPOINT=https://你的域名            # 有域名，RichHeader 也能用
+# WEB_ENDPOINT=http://你的服务器IP:8443  # 没域名，只修这个报错
 ```
+
+> 填 IP + 非标端口**只解决 `Invalid URL` 这一个报错**，RichHeader 卡片仍然会 `WEBPAGE_URL_INVALID`（见坑 13）。
 
 ### 坑 9：表情包/图片转发失败 `ENOENT`
 
@@ -671,6 +707,12 @@ stat '/app/.config/QQ/NapCat/temp/tmp-51-xxx.tmp'
 
 **解决**：两个容器挂同一个卷到 `/app/.config/QQ/NapCat/temp`。
 
+> 自检：Q2TG 的临时目录由 `CACHE_DIR` 决定（默认 `${DATA_DIR}/cache`，镜像里落到上面这个路径）。改过 `DATA_DIR` / `CACHE_DIR` 的话，共享卷路径要跟着改，否则 ENOENT 照旧：
+>
+> ```bash
+> docker compose exec q2tg env | grep -E 'DATA_DIR|CACHE_DIR'
+> ```
+
 ### 坑 10：安全组放行了还连不上
 
 **原因**：服务器 ufw 默认 deny。
@@ -679,11 +721,13 @@ stat '/app/.config/QQ/NapCat/temp/tmp-51-xxx.tmp'
 
 ### 坑 11：SnowLuma 重建后 Q2TG 连不上
 
-**原因**：`qq-bridge` 网络是手动 `docker network connect` 加的，重建后丢失。
+**原因**：`qq-bridge` 是外部网络，容器重建后如果 compose 里没声明，成员关系就丢了。
 
-**解决**：重新 connect，并把网络写进 compose：
+**解决**：5.2 的 compose 已经声明了 `qq-bridge`，正常重建不会丢。真丢了先查成员：
 
 ```bash
+docker network inspect qq-bridge --format '{{range .Containers}}{{.Name}} {{end}}'
+# 缺了应急补一个（下次重建还会丢，所以网络必须写进 compose）
 docker network connect qq-bridge snowluma
 ```
 
@@ -706,12 +750,23 @@ ReferenceError: length is not defined
 
 **解决**：
 
-- 要 RichHeader → 必须 HTTPS 域名
-- 否则关掉：
+- 要 RichHeader → 必须 HTTPS 域名，而且反代里 `/richHeader/` 不能加认证（见 10.3）
+- 否则关掉。**推荐用 bot 命令**，即时生效、不用重启：
 
-```sql
-UPDATE "Instance" SET flags = flags | 16384 WHERE id = 0;
 ```
+/flags add DISABLE_RICH_HEADER
+```
+
+  实在要改库也行（`flags` 是位掩码，`DISABLE_RICH_HEADER = 1 << 14 = 16384`）：
+
+```bash
+cd /opt/q2tg
+docker compose exec -T postgres psql -U q2tg -d q2tg -c \
+  'UPDATE "Instance" SET flags = COALESCE(flags,0) | 16384 WHERE id = 0;'
+docker compose restart q2tg      # 必须重启：flags 只在进程启动时读进内存
+```
+
+> 注意 `COALESCE(flags,0)`：`flags` 若是 NULL，`NULL | 16384` 还是 NULL，等于没改。
 
 ### 坑 14：/addfriend 显示 `undefined (NaN)`
 
@@ -748,18 +803,32 @@ Q2TG 镜像 `ghcr.io/clansty/q2tg:sleepyfox` 的 bundle 比上游源码旧，在
 
 ### 9.2 打补丁
 
+导出要在**尚未挂载** `patched/index.js` 的状态下做，否则挂载点会先变成同名目录，容器起不来、也 cp 不出东西：
+
 ```bash
 cd /opt/q2tg
 mkdir -p patched
-docker cp "$(docker compose ps -q q2tg):/app/build/index.js" patched/index.js.orig
+
+# 1) 先把 6.3 里 ./patched/index.js 那行挂载注释掉，再启动
+docker compose up -d q2tg
+
+# 2) 从容器里导出 bundle（-aq 而非 -q：容器处于 Exited 时 -q 取不到 ID）
+docker cp "$(docker compose ps -aq q2tg):/app/build/index.js" patched/index.js.orig
 cp patched/index.js.orig patched/index.js
 
 python3 - <<'PY'
 p = 'patched/index.js'
 s = open(p, encoding='utf-8').read()
 
+# 关键：str.replace 不匹配时不报错，会静默失败。这里强制断言。
+def sub(s, old, new, tag):
+    n = s.count(old)
+    if n != 1:
+        raise SystemExit(f"[{tag}] 期望匹配 1 次，实际 {n} 次 —— bundle 与本教程不符，不要继续")
+    return s.replace(old, new)
+
 # A：修复 inlineDigitInput
-s = s.replace(
+s = sub(s,
 """    function getDisplay() {
       const leftLength = length - input.length;
       let display = Array.from(input);
@@ -771,32 +840,34 @@ s = s.replace(
       let display = Array.from(input);
       display.push(SYMBOL_INPUT);
       return `>>>  ${display.join(SYMBOL_SPACE)}  <<<`;
-    }""")
+    }""", 'A')
 
 # B：好友字段兼容
-s = s.replace("""            nickname: friend.nick,
+s = sub(s, """            nickname: friend.nick,
             uid: parseInt(friend.uin),""",
 """            nickname: friend.nick ?? friend.nickname,
-            uid: parseInt(friend.uin ?? friend.user_id),""")
-s = s.replace("""              uid: parseInt(it.uin),""",
-"""              uid: parseInt(it.uin ?? it.user_id),""")
+            uid: parseInt(friend.uin ?? friend.user_id),""", 'B1')
+s = sub(s, """              uid: parseInt(it.uin),""",
+"""              uid: parseInt(it.uin ?? it.user_id),""", 'B2')
 
 # C：邀请 bot 用 username
-s = s.replace("await chat.inviteMember(this.tgBot.me.id);",
-              "await chat.inviteMember(this.tgBot.me.username || this.tgBot.me.id);")
+s = sub(s, "await chat.inviteMember(this.tgBot.me.id);",
+        "await chat.inviteMember(this.tgBot.me.username || this.tgBot.me.id);", 'C')
 
 open(p, 'w', encoding='utf-8').write(s)
 print("patched")
 PY
 
-# 校验
+# 校验（三个补丁各自留痕，缺一即说明没打上）
 node --check patched/index.js
-grep -c "friend.uin ?? friend.user_id" patched/index.js
+grep -c 'length - input.length' patched/index.js            # 期望 0
+grep -c 'friend.uin ?? friend.user_id' patched/index.js     # 期望 1
+grep -c 'me.username || this.tgBot.me.id' patched/index.js  # 期望 1
 ```
 
 ### 9.3 挂载生效
 
-compose 里已有：
+把 9.2 第 1 步注释掉的那行挂载**恢复**：
 
 ```yaml
 volumes:
@@ -836,63 +907,82 @@ docker compose up -d q2tg
 
 ### 10.3 nginx 反代示例
 
-有域名和证书时用这一份，对应 10.1 里推荐的 **HTTPS + Basic Auth**：
+先装依赖并生成密码文件：
+
+```bash
+apt-get install -y nginx apache2-utils certbot
+htpasswd -c /etc/nginx/.htpasswd 你的用户名
+```
+
+`map` 放到 `http {}` 块里（或单独文件丢进 `/etc/nginx/conf.d/`）：
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+```
 
 ```nginx
 server {
     listen 8443 ssl;
-    # 需要 HTTP/2 就写 listen 8443 ssl http2;（nginx 1.25.1 起改为单独一行 http2 on;）
+    # nginx >= 1.25.1 可以写单独一行 http2 on;，旧版写 listen 8443 ssl http2;
     server_name 你的域名;
 
-    ssl_certificate     /etc/nginx/ssl/fullchain.pem;
-    ssl_certificate_key /etc/nginx/ssl/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/你的域名/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/你的域名/privkey.pem;
     ssl_protocols       TLSv1.2 TLSv1.3;
 
     client_max_body_size 100m;
     server_tokens off;
 
-    # 生成密码文件：htpasswd -c /etc/nginx/.htpasswd 你的用户名
-    auth_basic           "restricted";
-    auth_basic_user_file /etc/nginx/.htpasswd;
-
+    # 认证只放在 "/" 里面，**不要**放 server 级：
+    # auth_basic 会被所有 location 继承，放到 server 级就会连 /richHeader/ 一起挡掉
     location / {
+        auth_basic           "SnowLuma";
+        auth_basic_user_file /etc/nginx/.htpasswd;
+
         proxy_pass http://127.0.0.1:5099;
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        $connection_upgrade;
         proxy_read_timeout 3600s;
         proxy_buffering off;
     }
 
-    # RichHeader 卡片：Telegram 服务器会主动来抓图，这里**不能**加 auth_basic，
-    # 否则抓取拿到 401，预览图全部失效（见坑 13）
+    # RichHeader 卡片：Telegram 服务器匿名来抓，必须放开认证
     location /richHeader/ {
         proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
     }
 
-    # 合并转发查看器：给自己看的，可以加认证
+    # 合并转发查看器：Telegram WebAPP 打开，同样必须匿名可访问
     location /ui/ {
-        auth_basic           "restricted";
-        auth_basic_user_file /etc/nginx/.htpasswd;
         proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 ```
 
+```bash
+nginx -t && systemctl reload nginx
+```
+
 > **注意**
 >
 > - 这份配置是 **HTTPS**（`listen 8443 ssl;`）。收明文 HTTP 会直接 400，见坑 7。
-> - `/richHeader/` 必须放开认证：那是 telegram 服务器来抓的，不是给你浏览器看的。
+> - `/richHeader/` 和 `/ui/` **必须匿名可访问**：前者是 Telegram 服务器来抓图，后者是 WebAPP 打开，都不会带你的 Basic 凭据。加了认证就是 401。
 > - 没有域名就别降级用 HTTP 明文反代，走 SSH 隧道（10.1 里安全等级最高的那个）。
-> - 上了 Basic Auth 后，`WEB_ENDPOINT` 仍要写成 `https://你的域名:8443`，TG 抓图走的是无认证路径。
+> - 上了 SSL 后，6.2 的 `WEB_ENDPOINT` 要同步改成 `https://你的域名`。
 
 ### 10.4 其他建议
 
@@ -937,7 +1027,7 @@ ss -tln | grep -E ':(3000|3001|5099|6081|8080)'
 
 # 容器网络
 docker inspect snowluma --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}'
-docker run --rm --network qq-bridge busybox nc -zv snowluma 3001
+docker run --rm --network qq-bridge busybox sh -c 'nc -w 2 snowluma 3001 </dev/null && echo OK'
 
 # 数据库
 cd /opt/q2tg
@@ -961,9 +1051,12 @@ docker compose exec -T postgres psql -U q2tg -d q2tg -c \
 ```bash
 # 数据卷
 for v in qq-gateway-data qq-client-config qq-client-data q2tg-data q2tg-postgresql; do
-  docker run --rm -v $v:/data -v $(pwd):/backup alpine \
-    tar czf /backup/$v.tgz -C /data .
+  docker run --rm -v "$v:/data" -v "$PWD:/backup" alpine \
+    tar czf "/backup/$v.tgz" -C /data .
 done
+
+# 恢复：docker run --rm -v "$v:/data" -v "$PWD:/backup" alpine tar xzf "/backup/$v.tgz" -C /data
+# 注意 docker compose down -v 会连 q2tg-cache 一起删掉
 
 # 配置
 tar czf configs.tgz /opt/snowluma /opt/q2tg
