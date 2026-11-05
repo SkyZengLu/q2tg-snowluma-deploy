@@ -1,0 +1,124 @@
+# SnowLuma + Q2TG 公网反代示例（nginx）
+#
+# 两个上游：
+#   SnowLuma WebUI : 127.0.0.1:5099
+#   Q2TG Web       : 127.0.0.1:8080（/richHeader/ 与 /ui/）
+#
+# 核心规则：/richHeader/ 和 /ui/ 必须匿名可访问——Telegram 服务器来抓图、
+# Telegram WebApp 打开时都不会带你的 Basic 凭据。auth_basic 只放在 location / 里。
+#
+# ============================================================================
+# 方案 A：有域名 —— HTTPS + Basic Auth（推荐）
+# ============================================================================
+# 1) 域名 A 记录指向服务器；安全组放行 80/443
+# 2) 证书：certbot certonly --nginx -d 你的域名
+# 3) Basic Auth 口令文件：
+#      printf '你的用户名:%s\n' "$(openssl passwd -apr1 '换成强密码')" > /etc/nginx/.htpasswd
+#      chmod 640 /etc/nginx/.htpasswd; chown root:www-data /etc/nginx/.htpasswd
+# 4) 写入下方位点，nginx -t && systemctl reload nginx
+# ----------------------------------------------------------------------------
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name 你的域名;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;                       # nginx < 1.25.1 写 listen 443 ssl http2;
+    server_name 你的域名;
+
+    ssl_certificate     /etc/letsencrypt/live/你的域名/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/你的域名/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    client_max_body_size 100m;
+    server_tokens off;
+
+    # SnowLuma WebUI：叠一层 Basic Auth
+    location / {
+        auth_basic           "snowluma";
+        auth_basic_user_file /etc/nginx/.htpasswd;
+
+        proxy_pass http://127.0.0.1:5099;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        $connection_upgrade;
+        proxy_read_timeout 3600s;
+        proxy_buffering off;
+    }
+
+    # RichHeader 头像卡片：Telegram 服务器匿名来抓
+    location /richHeader/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+    }
+
+    # 合并转发查看器：Telegram WebApp 打开
+    location /ui/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# ============================================================================
+# 方案 B：只有 IP —— 8443 + 自签证书（浏览器会提示不安全）
+# ============================================================================
+# 前置：安全组放行 TCP 8443
+# 只反代 SnowLuma WebUI；Q2TG 的 /richHeader/ 需要 HTTPS 域名才能用 RichHeader，
+# 没域名时建议直接 /flags add DISABLE_RICH_HEADER。
+# ----------------------------------------------------------------------------
+# server {
+#     listen 8443 ssl;
+#     server_name 你的服务器IP;
+#
+#     ssl_certificate     /etc/nginx/ssl/snowluma-ip.crt;
+#     ssl_certificate_key /etc/nginx/ssl/snowluma-ip.key;
+#
+#     auth_basic           "snowluma";
+#     auth_basic_user_file /etc/nginx/.htpasswd;
+#
+#     location / {
+#         proxy_pass http://127.0.0.1:5099;
+#         proxy_http_version 1.1;
+#         proxy_set_header Host              $host;
+#         proxy_set_header X-Real-IP         $remote_addr;
+#         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+#         proxy_set_header X-Forwarded-Proto $scheme;
+#         proxy_set_header Upgrade           $http_upgrade;
+#         proxy_set_header Connection        $connection_upgrade;
+#         proxy_read_timeout 3600s;
+#         proxy_buffering off;
+#     }
+# }
+# 自签证书：
+#   install -d /etc/nginx/ssl
+#   openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+#     -keyout /etc/nginx/ssl/snowluma-ip.key -out /etc/nginx/ssl/snowluma-ip.crt \
+#     -subj "/CN=你的服务器IP" -addext "subjectAltName=IP:你的服务器IP"
+
+# ============================================================================
+# 绝对不能公网暴露的东西
+# ============================================================================
+#   - 6081 noVNC：等于你的 QQ 登录桌面，拿到就能操作你账号。
+#     只走 SSH 隧道：ssh -L 6081:127.0.0.1:6081 user@你的服务器IP
+#     然后本机打开 http://127.0.0.1:6081/vnc.html
+#   - 3000/3001 OneBot：拿到 accessToken 即可用你的 QQ 发消息。
+#   - 5432 PostgreSQL
+#   - VNC 密码 / WebUI 初始密码：只在 /opt/snowluma/credentials.txt（0600）里

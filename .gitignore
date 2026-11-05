@@ -1,0 +1,17 @@
+# 真实凭据一律不进 Git
+.env
+.env.*
+!.env.example
+*.orig
+*.bak-*
+patched/index.js
+credentials.txt
+*.log
+*.png
+*.jpg
+*.jpeg
+
+# 临时/缓存
+.q2tg-cache/
+node_modules/
+__pycache__/

@@ -1,0 +1,59 @@
+# Q2TG v4 —— QQ ↔ Telegram 群互转（接 SnowLuma 的 OneBot v11 WS）
+# 官方：https://github.com/clansty/Q2TG （AGPL-3.0）
+#
+# 架构：SnowLuma 负责登录 QQ 并暴露 OneBot WS(3001) → Q2TG 用 NAPCAT_WS_URL 消费
+#       （Q2TG 的 NapCatClient 就是标准 OneBot 11 WS 客户端）
+#       不需要 icqq / qsign / NapCat 容器
+# 依赖：Docker；PostgreSQL 由本文件拉起；Telegram 三项凭据需填 .env
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:14-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-q2tg}
+      POSTGRES_USER: ${POSTGRES_USER:-q2tg}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 设置 POSTGRES_PASSWORD}
+    volumes:
+      - postgresql:/var/lib/postgresql/data
+
+  q2tg:
+    image: ${Q2TG_IMAGE:-ghcr.io/clansty/q2tg:sleepyfox}
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    ports:
+      # 只绑本机；RichHeader / 合并转发查看器需再经 HTTP 反代暴露
+      - "127.0.0.1:${Q2TG_WEB_PORT:-8080}:8080"
+    volumes:
+      - q2tg:/app/data
+      # 与 SnowLuma 共享临时目录（发图片/表情包必需）
+      - cache:/app/.config/QQ/NapCat/temp
+      # 修复镜像自带的 3 个 bug（见 patches/）。首次启动前先导出 bundle 并打补丁，
+      # 否则 Docker 会把挂载点创建成同名「目录」，容器直接起不来。
+      # 打补丁期间先注释掉下面这行。
+      - ./patched/index.js:/app/build/index.js
+    networks:
+      - default
+      - qq-bridge          # 与 snowluma 容器互通
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgres://${POSTGRES_USER:-q2tg}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB:-q2tg}
+      # 关键：指向 SnowLuma 的 OneBot WS（带 SnowLuma 的 accessToken）
+      - NAPCAT_WS_URL=ws://snowluma:3001/?access_token=${ONEBOT_WS_TOKEN}
+      - TG_CONNECTION=${TG_CONNECTION:-tcp}
+      - TZ=${TZ:-Asia/Shanghai}
+
+volumes:
+  postgresql:
+    name: q2tg-postgresql
+  q2tg:
+    name: q2tg-data
+  cache:
+    name: q2tg-cache
+
+networks:
+  default:
+  qq-bridge:
+    external: true
+    name: qq-bridge

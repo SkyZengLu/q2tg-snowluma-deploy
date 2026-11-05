@@ -1,0 +1,69 @@
+# SnowLuma —— Docker Compose（公开版模板）
+# 依据官方文档：https://snowluma.github.io/zh/docs/guide/deploy/docker
+# 安全基线：所有端口只绑 127.0.0.1，公网访问统一走反向代理（见 deploy/nginx/）。
+#
+# 与本地原独立版（snowluma/docker-compose.yml）的差异，仅两处共享声明：
+#   + qq-bridge 外部网络  —— Q2TG 的 compose 以 external 引用；不声明则两个容器不互通，
+#                            Q2TG 连不上 OneBot（日志没有 "WS 连接成功"）
+#   + q2tg-cache 外部卷   —— Q2TG 与 SnowLuma 必须共享 NapCat 临时目录；
+#                            不挂则图片/表情包转发报 ENOENT
+services:
+  snowluma:
+    image: ${SNOWLUMA_IMAGE:-motricseven7/snowluma:latest}
+    container_name: ${SNOWLUMA_CONTAINER:-snowluma}
+    restart: unless-stopped
+    # QQ（Chromium 系）需要更大的 /dev/shm，容器默认 64MB 会崩
+    shm_size: 1gb
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 1048576
+    # ptrace 注入 QQ 进程所需，不能省
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      # 留空则首次启动随机生成，只在容器日志里打印一次（中英文各一行）
+      VNC_PASSWD: ${VNC_PASSWD:?请在 .env 设置 VNC_PASSWD}
+      SNOWLUMA_UID: ${SNOWLUMA_UID:-1000}
+      SNOWLUMA_GID: ${SNOWLUMA_GID:-1000}
+      SNOWLUMA_WEBUI_HOST: 0.0.0.0
+      SNOWLUMA_WEBUI_PORT: 5099
+      SNOWLUMA_LOG_LEVEL: ${SNOWLUMA_LOG_LEVEL:-info}
+      SNOWLUMA_SCREEN: ${SNOWLUMA_SCREEN:-1920x1080x24}
+      SNOWLUMA_HOOK_AUTOLOAD: "1"
+      SNOWLUMA_QQ_FLAGS: "--disable-gpu --disable-software-rasterizer --disable-gpu-compositing"
+    ports:
+      # 全部只绑本机；公网统一走反代
+      - "127.0.0.1:${NOVNC_PORT:-6081}:6081"                       # noVNC（扫码用，建议 SSH 隧道）
+      - "127.0.0.1:${SNOWLUMA_WEBUI_HOST_PORT:-5099}:5099"         # WebUI
+      - "127.0.0.1:${ONEBOT_HTTP_PORT:-3000}:3000"                  # OneBot HTTP
+      - "127.0.0.1:${ONEBOT_WS_PORT:-3001}:3001"                    # OneBot WS
+    volumes:
+      - qq-gateway-data:/app/data
+      - qq-client-config:/app/.config
+      - qq-client-data:/app/.local/share
+      # 与 Q2TG 共享临时目录（发图片/表情包必需），由 Q2TG 的 compose 创建
+      - q2tg-cache:/app/.config/QQ/NapCat/temp
+    networks:
+      - default
+      - qq-bridge          # 与 Q2TG 互通
+
+volumes:
+  qq-gateway-data:
+    name: qq-gateway-data
+  qq-client-config:
+    name: qq-client-config
+  qq-client-data:
+    name: qq-client-data
+  q2tg-cache:
+    external: true
+    name: q2tg-cache
+
+networks:
+  default: {}
+  qq-bridge:
+    external: true
+    name: qq-bridge
