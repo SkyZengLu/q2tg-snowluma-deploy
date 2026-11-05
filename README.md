@@ -1,5 +1,7 @@
 # Q2TG + SnowLuma 搭建教程（QQ ↔ Telegram 双向转发）
 
+> 讨论与反馈：[clansty/Q2TG · Discussion #259](https://github.com/clansty/Q2TG/discussions/259)
+
 > 2026/11/5 · 教程 · QQ · Telegram · Docker · Ubuntu
 
 本文记录一次完整的 Q2TG 部署过程：用 **SnowLuma** 登录 QQ 并提供 OneBot 接口，用 **Q2TG v4** 把 QQ 群和 Telegram 群双向打通。
