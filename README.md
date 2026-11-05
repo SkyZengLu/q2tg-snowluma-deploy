@@ -29,7 +29,7 @@
 - [五、部署 SnowLuma（QQ 侧）](#五部署-snowlumaqq-侧)
 - [六、部署 Q2TG（Telegram 侧）](#六部署-q2tgtelegram-侧)
 - [七、初始化配置](#七初始化配置)
-- [八、踩坑记录（15 条）](#八踩坑记录15-条)
+- [八、踩坑记录（14 条）](#八踩坑记录14-条)
 - [九、镜像补丁说明](#九镜像补丁说明)
 - [十、公网访问与安全](#十公网访问与安全)
 - [十一、日常维护与排障](#十一日常维护与排障)
@@ -478,11 +478,11 @@ NAPCAT_WS_URL=ws://snowluma:3001/?access_token=<第五节的 WS_TOKEN>
 # 其他
 TG_CONNECTION=tcp
 TZ=Asia/Shanghai
-# 必须填一个合法 URL，否则群消息转发全挂（见坑 8）。
+# 必须填一个合法 URL，否则群消息转发全挂（见坑 7）。
 # 有域名 → RichHeader 卡片、合并转发查看器都能用
 WEB_ENDPOINT=https://你的域名
-# 没域名 → 不要填 http://IP:8443：10.3 的 nginx 是 TLS 监听，明文请求会 400（见坑 7）。
-# 改成一个格式合法的占位 URL 把 Invalid URL 压住，再用 /flags add DISABLE_RICH_HEADER 关掉卡片（见坑 13）：
+# 没域名 → 不要填 http://IP:8443：10.3 的 nginx 是 TLS 监听，明文请求会 400（见坑 6）。
+# 改成一个格式合法的占位 URL 把 Invalid URL 压住，再用 /flags add DISABLE_RICH_HEADER 关掉卡片（见坑 12）：
 # WEB_ENDPOINT=https://example.com
 
 # 合并转发查看器（可选）：先在 BotFather /newapp 注册 https://你的域名/ui/chatRecord
@@ -617,28 +617,9 @@ docker compose logs q2tg | grep "WS 连接成功"
 
 ---
 
-## 八、踩坑记录（15 条）
+## 八、踩坑记录（14 条）
 
-### 坑 1：sudo 要密码 / 不在 sudoers 里
-
-**现象**：`sudo` 提示输密码，或当前用户根本没权限；Docker、apt 全部跑不起来。
-
-**解决**：先确认是不是免密：
-
-```bash
-sudo -n true && echo "免密 OK" || echo "需要密码或没有权限"
-```
-
-临时开 NOPASSWD（仅安装期间，用完删）：
-
-```bash
-echo "$USER ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/90-temp
-sudo chmod 0440 /etc/sudoers.d/90-temp
-sudo visudo -cf /etc/sudoers.d/90-temp   # 语法校验，不通过就别退出当前会话
-# 装完删掉：sudo rm /etc/sudoers.d/90-temp
-```
-
-### 坑 2：Docker Hub 被墙 / 镜像站卡死
+### 坑 1：Docker Hub 被墙 / 镜像站卡死
 
 **现象**：`docker pull` 卡住，`/var/lib/containerd` 不增长。
 
@@ -649,7 +630,7 @@ sudo visudo -cf /etc/sudoers.d/90-temp   # 语法校验，不通过就别退出�
 
 **解决**：换 `docker.m.daocloud.io`（实测 366 KB/s）。
 
-### 坑 3：pkill 把自己杀了
+### 坑 2：pkill 把自己杀了
 
 **现象**：执行清理命令后当前命令也被杀。
 
@@ -657,19 +638,19 @@ sudo visudo -cf /etc/sudoers.d/90-temp   # 语法校验，不通过就别退出�
 
 **解决**：用 `pkill -x docker`。
 
-### 坑 4：二维码过期
+### 坑 3：二维码过期
 
 **现象**：扫码提示"二维码已过期"。
 
 **解决**：点界面「刷新」重新生成，或用 5.4 节的 XTest 脚本远程点。
 
-### 坑 5：设备确认收不到 / 超时
+### 坑 4：设备确认收不到 / 超时
 
 **现象**：提示"请在手机QQ上确认登录"，手机没反应，约 8 分钟后提示失败。
 
 **解决**：改用**扫码登录**（界面底部「账户登录」切换）。
 
-### 坑 6：noVNC 连上就断开
+### 坑 5：noVNC 连上就断开
 
 **现象**：点连接秒断，显示"已断开（正常关闭）"。
 
@@ -677,7 +658,7 @@ sudo visudo -cf /etc/sudoers.d/90-temp   # 语法校验，不通过就别退出�
 
 **解决**：重启 x11vnc（命令见 5.4 节）。
 
-### 坑 7：HTTPS 端口收到 HTTP → 400
+### 坑 6：HTTPS 端口收到 HTTP → 400
 
 **现象**：`400 Bad Request: The plain HTTP request was sent to HTTPS port`。
 
@@ -685,7 +666,7 @@ sudo visudo -cf /etc/sudoers.d/90-temp   # 语法校验，不通过就别退出�
 
 **解决**：访问时写 `https://`，或把 nginx 改成纯 HTTP。
 
-### 坑 8：Q2TG 转发全部失败 `Invalid URL`
+### 坑 7：Q2TG 转发全部失败 `Invalid URL`
 
 **现象**：
 
@@ -703,10 +684,10 @@ WEB_ENDPOINT=https://你的域名            # 有域名，RichHeader 也能用
 # WEB_ENDPOINT=https://example.com       # 没域名：占位 URL 压掉报错，再用 /flags add DISABLE_RICH_HEADER 关卡片
 ```
 
-> 不要填 `http://你的服务器IP:8443`：10.3 的 nginx 是 `listen 8443 ssl`，明文请求会 400（坑 7）。
-> 占位 URL 只解决 `Invalid URL` 这一个报错，RichHeader 卡片仍然会 `WEBPAGE_URL_INVALID`（见坑 13），需要关掉。
+> 不要填 `http://你的服务器IP:8443`：10.3 的 nginx 是 `listen 8443 ssl`，明文请求会 400（坑 6）。
+> 占位 URL 只解决 `Invalid URL` 这一个报错，RichHeader 卡片仍然会 `WEBPAGE_URL_INVALID`（见坑 12），需要关掉。
 
-### 坑 9：表情包/图片转发失败 `ENOENT`
+### 坑 8：表情包/图片转发失败 `ENOENT`
 
 **现象**：
 
@@ -725,13 +706,13 @@ stat '/app/.config/QQ/NapCat/temp/tmp-51-xxx.tmp'
 > docker compose exec q2tg env | grep -E 'DATA_DIR|CACHE_DIR'
 > ```
 
-### 坑 10：安全组放行了还连不上
+### 坑 9：安全组放行了还连不上
 
 **原因**：服务器 ufw 默认 deny。
 
 **解决**：`ufw allow <端口>/tcp`。
 
-### 坑 11：SnowLuma 重建后 Q2TG 连不上
+### 坑 10：SnowLuma 重建后 Q2TG 连不上
 
 **原因**：`qq-bridge` 是外部网络，容器重建后如果 compose 里没声明，成员关系就丢了。
 
@@ -743,7 +724,7 @@ docker network inspect qq-bridge --format '{{range .Containers}}{{.Name}} {{end}
 docker network connect qq-bridge snowluma
 ```
 
-### 坑 12：/setup 验证码崩溃
+### 坑 11：/setup 验证码崩溃
 
 **现象**：
 
@@ -756,7 +737,7 @@ ReferenceError: length is not defined
 
 **解决**：打补丁 A（见第九节）。
 
-### 坑 13：RichHeader 报 `WEBPAGE_URL_INVALID`
+### 坑 12：RichHeader 报 `WEBPAGE_URL_INVALID`
 
 **原因**：Telegram 服务器访问不了 `http://IP:非标端口`，无法生成网页预览。
 
@@ -780,13 +761,13 @@ docker compose restart q2tg      # 必须重启：flags 只在进程启动时读
 
 > 注意 `COALESCE(flags,0)`：`flags` 若是 NULL，`NULL | 16384` 还是 NULL，等于没改。
 
-### 坑 14：/addfriend 显示 `undefined (NaN)`
+### 坑 13：/addfriend 显示 `undefined (NaN)`
 
 **原因**：Q2TG 按 NapCat 字段解析（`friend.nick` / `friend.uin`），SnowLuma 返回的是 OneBot 标准字段（`nickname` / `user_id`）。
 
 **解决**：打补丁 B。
 
-### 坑 15：创建群邀请 bot 失败
+### 坑 14：创建群邀请 bot 失败
 
 **现象**：
 
@@ -991,7 +972,7 @@ nginx -t && systemctl reload nginx
 
 > **注意**
 >
-> - 这份配置是 **HTTPS**（`listen 8443 ssl;`）。收明文 HTTP 会直接 400，见坑 7。
+> - 这份配置是 **HTTPS**（`listen 8443 ssl;`）。收明文 HTTP 会直接 400，见坑 6。
 > - `/richHeader/` 和 `/ui/` **必须匿名可访问**：前者是 Telegram 服务器来抓图，后者是 WebAPP 打开，都不会带你的 Basic 凭据。加了认证就是 401。
 > - 没有域名就别降级用 HTTP 明文反代，走 SSH 隧道（10.1 里安全等级最高的那个）。
 > - 上了 SSL 后，6.2 的 `WEB_ENDPOINT` 要同步改成 `https://你的域名`。
